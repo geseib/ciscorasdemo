@@ -1,0 +1,1163 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Add Transit Gateway and Datacenter Router"
+
+Metadata:
+  "AWS::CloudFormation::Interface":
+    ParameterGroups:
+      - Label:
+          default: "VPC Parameters"
+        Parameters:
+          - AvailabilityZoneA
+          - AvailabilityZoneB
+
+Parameters:
+
+  MgmtExternalAccessCidr:
+    Description: 'CAUTION: by default, the management port is world addressable. You
+      should change this to your address or CIDR block. Additional CIDRs may be manually
+      added post-deployment'
+    Type: String
+    AllowedPattern: ^((25[0-5]|2[0-4][0-9]|[1]?[0-9][0-9]?)(\.|\/)){4}([0-9]|[1-2][0-9]|3[0-2])$
+    Default: 0.0.0.0/0
+
+  AsaHostname:
+    Description: Hostname of the ASA
+    Type: String
+    Default: ciscoasa
+  
+  asaPassword:
+    Description: password for the ASA
+    Type: String
+    Default: awsamazon
+
+  AvailabilityZoneA:
+    Description: Availability Zone 1
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-2a
+  AvailabilityZoneB:
+    Description: Availability Zone 2
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-2b
+
+  KeyPair:
+    Description: "Keypair to access the CSR or Juniper"
+    Type: "AWS::EC2::KeyPair::KeyName"
+    Default: "osx-kp"
+
+
+
+Mappings:
+  # AMI for Cisco CSR1kv, vASA and Linux2
+  RegionMap:
+
+    "us-east-1":
+      CSRAMI: "ami-0d1e6af4c329efd82"
+      AMI: "ami-0b898040803850657"
+      ASAAMI: "ami-0c847ec15a09e65c5"
+    "us-east-2":
+      CSRAMI: "ami-0a7ff2b6b77a28edc"
+      AMI: "ami-0d8f6eb4f641ef691"
+      ASAAMI: "ami-0bc000234a7a43e52"
+    "us-west-1":
+      CSRAMI: "ami-03071ea2421d5ad89"
+      SRXAMI: ami-9186aff1
+      AMI: "ami-056ee704806822732"
+    "us-west-2":
+      CSRAMI: "ami-0bd4d0d69610e277c"
+      AMI: "ami-082b5a644766e0e6f"
+      ASAAMI: "ami-05b12b5937a68ff21"
+
+Resources:
+  # Transit VPC
+  # DCVPC Resources - Public Subnets, IGW, and NATGW
+  DCVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.24.0.0/16"
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [DCVPC, Ref: "AWS::StackName"]]
+        - Key: project
+          Value: tgwdemo
+
+  DCVPCPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: DCVPC
+      CidrBlock: "10.24.0.0/25"
+      AvailabilityZone:
+        Ref: AvailabilityZoneA
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [DCVPC, Ref: "AWS::StackName", Pub-A Subnet]]
+
+  DCVPCPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: DCVPC
+      CidrBlock: "10.24.0.128/25"
+      AvailabilityZone:
+        Ref: AvailabilityZoneB
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [DCVPC, Ref: "AWS::StackName", Pub-B Subnet]]
+
+  DCVPCPublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: DCVPC
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [DCVPC, Ref: "AWS::StackName", Public Route Table]]
+
+  DCVPCPublicASubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: DCVPCPublicSubnetRouteTable
+      SubnetId:
+        Ref: DCVPCPublicSubnetA
+
+  DCVPCPublicBSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: DCVPCPublicSubnetRouteTable
+      SubnetId:
+        Ref: DCVPCPublicSubnetB
+
+  DCVPCPrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: DCVPC
+      CidrBlock: "10.24.1.0/24"
+      AvailabilityZone:
+        Ref: AvailabilityZoneA
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [DCVPC, Ref: "AWS::StackName", Priv-A Subnet]]
+
+  DCVPCPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: DCVPC
+      CidrBlock: "10.24.2.0/24"
+      AvailabilityZone:
+        Ref: AvailabilityZoneB
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [DCVPC, Ref: "AWS::StackName", Priv-B Subnet]]
+
+  DCVPCPrivateSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: DCVPC
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [DCVPC, Ref: "AWS::StackName", Private Route Table]]
+
+  DCVPCPrivateASubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: DCVPCPrivateSubnetRouteTable
+      SubnetId:
+        Ref: DCVPCPrivateSubnetA
+
+  DCVPCPrivateBSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: DCVPCPrivateSubnetRouteTable
+      SubnetId:
+        Ref: DCVPCPrivateSubnetB
+
+  DCVPCServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [DCVPC, Ref: "AWS::StackName", "SSMRole"]]
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  DCVPCInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref DCVPCServerRole
+
+  #ICMP is allowed from anywhere within 10.0.0.0 address space (not recommended for real environments)
+  DCVPCEc2SecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open-up ports for ICMP and SSH from 10.x.x.x
+      GroupName: !Join ["-", [DCVPC, Ref: "AWS::StackName", "EC2-sec-group"]]
+      VpcId:
+        Ref: DCVPC
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          CidrIp: 10.0.0.0/8
+          FromPort: "-1"
+          ToPort: "-1"
+        - IpProtocol: icmp
+          CidrIp: 172.16.0.0/15
+          FromPort: "-1"
+          ToPort: "-1"
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 10.0.0.0/8
+
+
+  DCVPCEndpointSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open-up ports for local VPC
+      GroupName: !Join ["-", [DCVPC, Ref: "AWS::StackName", "vpc-sec-group"]]
+      VpcId:
+        Ref: DCVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "1"
+          ToPort: "65535"
+          CidrIp: 10.24.0.0/16
+        - IpProtocol: udp
+          FromPort: "1"
+          ToPort: "65535"
+          CidrIp: 10.24.0.0/16
+
+  DCVPCSSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId:
+        Ref: DCVPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: True
+      SubnetIds:
+        - Ref: DCVPCPrivateSubnetA
+        - Ref: DCVPCPrivateSubnetB
+      SecurityGroupIds:
+        - Ref: DCVPCEndpointSecGroup
+
+  DCVPCSSMMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId:
+        Ref: DCVPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: True
+      SubnetIds:
+        - Ref: DCVPCPrivateSubnetA
+        - Ref: DCVPCPrivateSubnetB
+      SecurityGroupIds:
+        - Ref: DCVPCEndpointSecGroup
+
+  DCVPCInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [DCVPC, "AWS::StackName", IGW]]
+
+  DCVPCAttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: DCVPC
+      InternetGatewayId:
+        Ref: DCVPCInternetGateway
+
+  DCVPCDirectInternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: DCVPCInternetGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: DCVPCInternetGateway
+      RouteTableId:
+        Ref: DCVPCPublicSubnetRouteTable
+
+  DCVPCNATEIP:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: vpc
+
+  DCVPCNATGateway:
+    DependsOn: DCVPCAttachGateway
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - DCVPCNATEIP
+          - AllocationId
+      SubnetId:
+        Ref: DCVPCPublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [DCVPC, "AWS::StackName", NATGW]]
+
+
+  DCVPCNATInternetRoutePrivate:
+    Type: AWS::EC2::Route
+    DependsOn: DCVPCInternetGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: DCVPCNATGateway
+      RouteTableId:
+        Ref: DCVPCPrivateSubnetRouteTable
+
+  DCVPCServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [DCVPC, Ref: "AWS::StackName", "SSMRole"]]
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  DCVPCInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref DCVPCServerRole
+
+  DCVPCEc2SecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open-up ports for ICMP and SSH from 10.x.x.x
+      GroupName: !Join ["-", [DCVPC, Ref: "AWS::StackName", "EC2-sec-group"]]
+      VpcId:
+        Ref: DCVPC
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          CidrIp: 10.0.0.0/8
+          FromPort: "-1"
+          ToPort: "-1"
+        - IpProtocol: icmp
+          CidrIp: 172.16.0.0/8
+          FromPort: "-1"
+          ToPort: "-1"
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 10.0.0.0/8
+
+  DCVPCServer:
+    Type: AWS::EC2::Instance
+    DependsOn: DCVPCPrivateSubnetB
+    Properties:
+      SubnetId:
+        Ref: DCVPCPrivateSubnetA
+      PrivateIpAddress: 10.24.1.10
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMI]
+      InstanceType: t2.micro
+      SecurityGroupIds:
+        - Ref: DCVPCEc2SecGroup
+      IamInstanceProfile:
+        Ref: DCVPCInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "DCVPC-${AWS::StackName}-Server"
+
+# Cloud9 Instance to configure the data center router
+  DCCloud9env:
+    Type: AWS::Cloud9::EnvironmentEC2
+    Properties:
+      Description: "Cloud9 environment for the running automation"
+      AutomaticStopTimeMinutes: 60
+      InstanceType: t2.large
+      Name: !Sub "${AWS::StackName}"
+      SubnetId: !Ref DCVPCPublicSubnetA
+      Repositories:
+        - PathComponent: /tgwdemo
+          RepositoryUrl: https://github.com/geseib/tgwdemo
+
+
+  # CSRVPN Router in the Datacenter
+
+  CSRIP:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: vpc
+
+  CiscoCustomerGateway:
+    Type: AWS::EC2::CustomerGateway
+    DependsOn: CSRIP
+    Properties:
+      BgpAsn: 65000
+      IpAddress: !Ref CSRIP
+      Tags:
+        - Key: Name
+          Value: DC1-CGW
+      Type: ipsec.1
+
+  ServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [DC1, Ref: "AWS::StackName", "SSMRole"]]
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref ServerRole
+
+  CSRSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open-up ports for local VPC and SSH
+      GroupName: !Join ["-", [CSR, Ref: "AWS::StackName", "sec-group"]]
+      VpcId:
+        Ref: DCVPC
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 10.24.0.0/16
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 10.24.0.0/16
+
+  CSRENI:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId:
+        Ref: DCVPCPublicSubnetA
+      Description: Interface for controlling traffic such as SSH
+      GroupSet:
+        - Ref: CSRSecGroup
+      SourceDestCheck: false
+      Tags:
+        - Key: Name
+          Value: CSR
+
+  CSRInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref CSRENI
+          DeviceIndex: 0
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", CSRAMI]
+      InstanceType: c4.large
+      KeyName: !Ref KeyPair
+      IamInstanceProfile:
+        Ref: InstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "DCVPC-${AWS::StackName}-CSR"
+
+  AssociateCSREIP:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt CSRIP.AllocationId
+      NetworkInterfaceId: !Ref CSRENI
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: CSRENI
+    Properties:
+      RouteTableId:
+        Ref: DCVPCPrivateSubnetRouteTable
+      DestinationCidrBlock: 10.0.0.0/8
+      NetworkInterfaceId:
+        Ref: CSRENI
+
+  Private172Route:
+    Type: AWS::EC2::Route
+    DependsOn: CSRENI
+    Properties:
+      RouteTableId:
+        Ref: DCVPCPrivateSubnetRouteTable
+      DestinationCidrBlock: 172.16.0.0/16
+      NetworkInterfaceId:
+        Ref: CSRENI
+  
+  Public172Route:
+    Type: AWS::EC2::Route
+    DependsOn: CSRENI
+    Properties:
+      RouteTableId:
+        Ref: DCVPCPublicSubnetRouteTable
+      DestinationCidrBlock: 172.16.0.0/16
+      NetworkInterfaceId:
+        Ref: CSRENI
+
+  
+    # RASVPC Resources - Public Subnets, IGW, and NATGW
+  RASVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "172.16.0.0/16"
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, Ref: "AWS::StackName"]]
+        - Key: project
+          Value: Firewall_Demo
+
+  RASVPCPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      CidrBlock: "172.16.0.0/25"
+      AvailabilityZone:
+        Ref: AvailabilityZoneA
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, Ref: "AWS::StackName", Pub-A Subnet]]
+
+  RASVPCPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      CidrBlock: "172.16.0.128/25"
+      AvailabilityZone:
+        Ref: AvailabilityZoneB
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, Ref: "AWS::StackName", Pub-B Subnet]]
+
+  RASVPCPublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, Ref: "AWS::StackName", Public Route Table]]
+
+  RASVPCPublicASubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RASVPCPublicSubnetRouteTable
+      SubnetId:
+        Ref: RASVPCPublicSubnetA
+
+  RASVPCPublicBSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RASVPCPublicSubnetRouteTable
+      SubnetId:
+        Ref: RASVPCPublicSubnetB
+
+  RASVPCPrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      CidrBlock: "172.16.1.0/24"
+      AvailabilityZone:
+        Ref: AvailabilityZoneA
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, Ref: "AWS::StackName", Priv-A Subnet]]
+
+  RASVPCPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      CidrBlock: "172.16.2.0/24"
+      AvailabilityZone:
+        Ref: AvailabilityZoneB
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, Ref: "AWS::StackName", Priv-B Subnet]]
+
+  RASVPCPrivateSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, Ref: "AWS::StackName", Private Route Table]]
+
+  RASVPCPrivateASubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RASVPCPrivateSubnetRouteTable
+      SubnetId:
+        Ref: RASVPCPrivateSubnetA
+
+  RASVPCPrivateBSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RASVPCPrivateSubnetRouteTable
+      SubnetId:
+        Ref: RASVPCPrivateSubnetB
+
+  RASVPCServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ["-", [RASVPC, Ref: "AWS::StackName", "SSMRole"]]
+      Path: "/"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  RASVPCInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref RASVPCServerRole
+
+  #ICMP is allowed from anywhere within 10.0.0.0 address space (not recommended for real environments)
+  RASVPCEc2SecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open-up ports for ICMP and SSH from 10.x.x.x
+      GroupName: !Join ["-", [RASVPC, Ref: "AWS::StackName", "EC2-sec-group"]]
+      VpcId:
+        Ref: RASVPC
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          CidrIp: 172.16.0.0/15
+          FromPort: "-1"
+          ToPort: "-1"
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 172.16.0.0/15
+
+  RASVPCServerEc2:
+    Type: AWS::EC2::Instance
+    DependsOn: RASVPCPrivateSubnetA
+    Properties:
+      SubnetId:
+        Ref: RASVPCPrivateSubnetA
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMI]
+      PrivateIpAddress: 172.16.1.10
+      InstanceType: t2.micro
+      SecurityGroupIds:
+        - Ref: RASVPCEc2SecGroup
+      IamInstanceProfile:
+        Ref: RASVPCInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "RASVPC-${AWS::StackName}-Server"
+      UserData: 
+          Fn::Base64:
+            Fn::Sub:
+              - |
+                #!/bin/bash
+                /usr/bin/yum -y install httpd php
+                /sbin/chkconfig httpd on
+                /sbin/service httpd start
+                /bin/echo -n "Welcome to my web server. Server private IP is " > /var/www/html/index.php
+                /opt/aws/bin/ec2-metadata -o | /bin/cut -d" " -f2 >> /var/www/html/index.php
+                /bin/echo -n "Availability Zone: " >> /var/www/html/index.php
+                /opt/aws/bin/ec2-metadata -z | /bin/cut -d" " -f2 >> /var/www/html/index.php
+                /bin/echo "Stack Name: ${stackName}" >> /var/www/html/index.php
+                /bin/echo "your ip is <?php \$ip = isset(\$_SERVER['HTTP_CLIENT_IP']) ? \$_SERVER['HTTP_CLIENT_IP'] : isset(\$_SERVER['HTTP_X_FORWARDED_FOR']) ? \$_SERVER['HTTP_X_FORWARDED_FOR'] : \$_SERVER['REMOTE_ADDR']; echo \$ip;?>" >> /var/www/html/index.php
+                /bin/echo "" >> /var/www/html/index.php
+                /sbin/service httpd restart
+              - stackName: !Ref AWS::StackName
+
+  RASVPCAttachSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      CidrBlock: "172.16.3.0/24"
+      AvailabilityZone:
+        Ref: AvailabilityZoneA
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, Ref: "AWS::StackName", Attach-A Subnet]]
+
+  RASVPCAttachSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      CidrBlock: "172.16.4.0/24"
+      AvailabilityZone:
+        Ref: AvailabilityZoneB
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, Ref: "AWS::StackName", Attach-B Subnet]]
+
+  RASVPCAttachSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, Ref: "AWS::StackName", Attach Route Table]]
+
+  RASVPCAttachASubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RASVPCAttachSubnetRouteTable
+      SubnetId:
+        Ref: RASVPCAttachSubnetA
+
+  RASVPCAttachBSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: RASVPCAttachSubnetRouteTable
+      SubnetId:
+        Ref: RASVPCAttachSubnetB
+
+  RASVPCEndpointSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Open-up ports for local VPC
+      GroupName: !Join ["-", [RASVPC, Ref: "AWS::StackName", "vpc-sec-group"]]
+      VpcId:
+        Ref: RASVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "1"
+          ToPort: "65535"
+          CidrIp: 172.16.0.0/16
+        - IpProtocol: udp
+          FromPort: "1"
+          ToPort: "65535"
+          CidrIp: 172.16.0.0/16
+
+  RASVPCSSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssm"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: True
+      SubnetIds:
+        - Ref: RASVPCAttachSubnetA
+        - Ref: RASVPCAttachSubnetB
+      SecurityGroupIds:
+        - Ref: RASVPCEndpointSecGroup
+
+  RASVPCSSMMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.ssmmessages"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: True
+      SubnetIds:
+        - Ref: RASVPCAttachSubnetA
+        - Ref: RASVPCAttachSubnetB
+      SecurityGroupIds:
+        - Ref: RASVPCEndpointSecGroup
+
+  RASVPCInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, "AWS::StackName", IGW]]
+
+  RASVPCAttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: RASVPC
+      InternetGatewayId:
+        Ref: RASVPCInternetGateway
+
+  RASVPCDirectInternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: RASVPCInternetGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: RASVPCInternetGateway
+      RouteTableId:
+        Ref: RASVPCPublicSubnetRouteTable
+
+  RASVPCNATEIP:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: vpc
+
+  RASVPCNATGateway:
+    DependsOn: RASVPCAttachGateway
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - RASVPCNATEIP
+          - AllocationId
+      SubnetId:
+        Ref: RASVPCPublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [RASVPC, "AWS::StackName", NATGW]]
+
+  RASVPCNATInternetRouteAttach:
+    Type: AWS::EC2::Route
+    DependsOn: RASVPCInternetGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: RASVPCNATGateway
+      RouteTableId:
+        Ref: RASVPCAttachSubnetRouteTable
+
+  RASVPCNATInternetRoutePrivate:
+    Type: AWS::EC2::Route
+    DependsOn: RASVPCInternetGateway
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: RASVPCNATGateway
+      RouteTableId:
+        Ref: RASVPCPrivateSubnetRouteTable
+
+
+#vASA
+
+  SecurityGroupAll:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow all traffic on RASVPC
+      VpcId: !Ref RASVPC
+      SecurityGroupIngress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join
+            - ''
+            - - !Ref 'AWS::StackName'
+              - -allow-all-RASVPC
+
+
+  sgManagementInterface:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow only traffic from MgmtExternalAccessCidr IP Ranges
+      VpcId: !Ref RASVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: !Ref 'MgmtExternalAccessCidr'
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: !Ref 'MgmtExternalAccessCidr'
+        - IpProtocol: icmp
+          FromPort: '-1'
+          ToPort: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Join
+            - ''
+            - - !Ref 'AWS::StackName'
+              - -allow-SSH-RASVPC
+
+  eipASAMgmt:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: !Ref RASVPC
+
+  eipaASAMgmt:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt 'eipASAMgmt.AllocationId'
+      NetworkInterfaceId: !Ref 'eniASAMgmt'
+
+  eniASAMgmt:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref RASVPCPublicSubnetA
+      PrivateIpAddress: !Ref 'AWS::NoValue'
+      Description: Interface for management traffic of ASA
+      GroupSet:
+        - !Ref 'sgManagementInterface'
+      SourceDestCheck: 'false'
+
+  eniASAInside:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref RASVPCPrivateSubnetA
+      PrivateIpAddress: !Ref 'AWS::NoValue'
+      Description: Interface for inside traffic of ASA
+      GroupSet:
+        - !Ref 'SecurityGroupAll'
+      SourceDestCheck: 'false'
+
+  eipASAOutside:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: !Ref RASVPC
+
+  eipaASAOutside:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt 'eipASAOutside.AllocationId'
+      NetworkInterfaceId: !Ref 'eniASAOutside'
+
+  eniASAOutside:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref RASVPCPublicSubnetA
+      PrivateIpAddress: !Ref 'AWS::NoValue'
+      Description: Interface for outside traffic of ASA
+      GroupSet:
+        - !Ref 'SecurityGroupAll'
+      SourceDestCheck: 'false'
+
+  CiscoASA:
+    Type: AWS::EC2::Instance
+    Properties:
+      DisableApiTermination: 'false'
+      InstanceInitiatedShutdownBehavior: stop
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", ASAAMI]
+      InstanceType: c4.large
+      KeyName: !Ref KeyPair
+      Monitoring: 'false'
+      Tags:
+        - Key: Name
+          Value: !Join
+            - ''
+            - - !Ref 'AWS::StackName'
+              - -asav
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+      NetworkInterfaces:
+        - Description: Management interface
+          DeviceIndex: 0
+          NetworkInterfaceId: !Ref 'eniASAMgmt'
+        - Description: Inside network interface
+          DeviceIndex: 1
+          NetworkInterfaceId: !Ref 'eniASAInside'
+        - Description: Outside network interface
+          DeviceIndex: 2
+          NetworkInterfaceId: !Ref 'eniASAOutside'
+      UserData: !Base64
+        Fn::Join:
+          - ''
+          - - "! ASA Version 9.4.1.200\n"
+            - "interface management0/0\n"
+            - "management-only\n"
+            - "nameif management\n"
+            - "security-level 100\n"
+            - "ip address dhcp setroute\n"
+            - "no shut\n"
+            - "!\n"
+            - "interface GigabitEthernet0/0\n"
+            - "nameif inside\n"
+            - "security-level 100\n"
+            - "ip address dhcp\n"
+            - "no shut\n"
+            - "!\n"
+            - "interface GigabitEthernet0/1\n"
+            - "nameif outside\n"
+            - "security-level 0\n"
+            - "ip address dhcp\n"
+            - "no shut\n"
+            - "!\n"
+            - "same-security-traffic permit inter-interface\n"
+            - "same-security-traffic permit intra-interface\n"
+            - "!\n"
+            - "crypto key generate rsa modulus 2048\n"
+            - "username admin privilege 15\n"
+            - "username admin attributes\n"
+            - "service-type admin\n"
+            - "! required config end\n"
+            - 'hostname '
+            - !Ref 'AsaHostname'
+            - "\n"
+            - "http server enable\n"
+            - "http 0.0.0.0 0.0.0.0 management\n"
+            - 'username webadmin password '
+            - !Ref 'asaPassword'
+            - "\n"
+            - 'enable password '
+            - !Ref 'asaPassword'
+            - "\n"
+            - "aaa authentication ssh console LOCAL\n"
+            - "telnet timeout 5\n"
+            - "ssh stricthostkeycheck\n"
+            - "ssh 0.0.0.0 0.0.0.0 management\n"
+            - "ssh timeout 30\n"
+            - "ssh key-exchange group dh-group14-sha1\n"
+            - "console timeout 0\n"
+
+
+  # Trasnit Gateway
+  TransitGateway:
+    Type: "AWS::EC2::TransitGateway"
+    Properties:
+        AmazonSideAsn: 65001
+        AutoAcceptSharedAttachments: "enable"
+        DefaultRouteTableAssociation: "enable"
+        DefaultRouteTablePropagation: "enable"
+        DnsSupport: "enable"
+        VpnEcmpSupport: "enable"
+        Tags: 
+          - 
+            Key: "Name"
+            Value: !Sub "tgw-${AWS::StackName}"
+
+
+  RASVPCAttachment:
+      Type: "AWS::EC2::TransitGatewayAttachment"
+      Properties:
+          VpcId: !Ref RASVPC
+          TransitGatewayId: !Ref TransitGateway
+          SubnetIds: 
+            - !Ref RASVPCPrivateSubnetA
+            - !Ref RASVPCPrivateSubnetB
+          Tags:
+            - 
+              Key: "Name"
+              Value: !Sub "${AWS::StackName}-RASVPC"
+
+  DCVPNAttachment: 
+      Type: AWS::EC2::VPNConnection
+      Properties: 
+        Type: ipsec.1
+        CustomerGatewayId: 
+          !Ref CiscoCustomerGateway
+        TransitGatewayId: 
+          !Ref TransitGateway
+        VpnTunnelOptionsSpecifications:
+        - PreSharedKey: awsamazon
+          TunnelInsideCidr: 169.254.10.0/30
+        - PreSharedKey: awsamazon
+          TunnelInsideCidr: 169.254.11.0/30
+
+
+  # VPC to TGW Associations
+  RASVPCAssociation:
+      Type: "AWS::EC2::TransitGatewayRouteTableAssociation"
+      Properties:
+          TransitGatewayRouteTableId: !Ref ProdRouteTable
+          TransitGatewayAttachmentId: !Ref RASVPCAttachment
+
+  # VPC to TGW Shared Propagation
+  RASVPCPropagationShared:
+    Type: "AWS::EC2::TransitGatewayRouteTablePropagation"
+    Properties:
+        TransitGatewayRouteTableId: !Ref SharedRouteTable
+        TransitGatewayAttachmentId: !Ref RASVPCAttachment
+
+
+  # Add Route to TGW in VPC route tables
+  RASVPCPrivateTGWRoute:
+      DependsOn: RASVPCAssociation
+      Type: "AWS::EC2::Route"
+      Properties:
+          RouteTableId: !Ref RASVPCPrivateSubnetRouteTable
+          DestinationCidrBlock: "10.0.0.0/8"
+          TransitGatewayId: !Ref TransitGateway
+
+  RASVPCPublicTGWRoute:
+      DependsOn: RASVPCAssociation
+      Type: "AWS::EC2::Route"
+      Properties:
+          RouteTableId: !Ref RASVPCPublicSubnetRouteTable
+          DestinationCidrBlock: "10.0.0.0/8"
+          TransitGatewayId: !Ref TransitGateway
+
+
+
+
+Outputs:
+  # Datacenter 1 Outputs
+  CSRSSH:
+    Description: "ssh command to CSR"
+    Value:
+      !Join [
+        "",
+        [
+          "ssh -i ~/.ssh/",
+          Ref: "KeyPair",
+          ".pem ec2-user@",
+          !GetAtt "CSRENI.PrimaryPrivateIpAddress",
+        ],
+      ]
+    Export:
+      Name: !Sub "DCVPC-${AWS::StackName}-CSRssh"
+  
+  CSRIP:
+    Description: "CSR Public IP for CGW config"
+    Value:
+      !Ref CSRIP      
+    Export:
+      Name: !Sub "DCVPC-${AWS::StackName}-CSRIP"
+  
